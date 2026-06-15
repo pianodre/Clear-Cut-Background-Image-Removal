@@ -1,0 +1,95 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply bg-ink-950 font-sans text-ink-100 antialiased;
+  }
+}
+
+@layer components {
+  /* Buttons — uppercase, letter-spaced, minimal, matching the references. */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-md px-5 py-2.5 text-xs font-semibold uppercase tracking-widest transition focus:outline-none focus:ring-2 focus:ring-white/40 focus:ring-offset-2 focus:ring-offset-ink-950 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  /* Solid white CTA (primary action). */
+  .btn-primary {
+    @apply btn bg-white text-ink-950 shadow-btn hover:bg-ink-100;
+  }
+  /* Outlined / ghost button. */
+  .btn-ghost {
+    @apply btn bg-transparent text-ink-100 ring-1 ring-inset ring-ink-600 hover:border-white hover:bg-ink-800;
+  }
+  /* Underline-only input, like the CONTACT FORM fields. */
+  .input {
+    @apply w-full border-0 border-b border-ink-600 bg-transparent px-1 py-2.5 text-sm text-ink-100 placeholder:text-ink-500 focus:border-white focus:outline-none focus:ring-0;
+  }
+  .label {
+    @apply mb-1 block text-[0.7rem] font-medium uppercase tracking-widest text-ink-400;
+  }
+  /* Raised dark panel. */
+  .card {
+    @apply rounded-xl border border-ink-700 bg-ink-900 shadow-panel;
+  }
+  /* Uppercase nav / micro labels. */
+  .nav-link {
+    @apply text-xs font-medium uppercase tracking-widest text-ink-300 transition hover:text-white;
+  }
+}
+
+@layer utilities {
+  /* Dark "stage" background with a soft radial vignette — the hero backdrop. */
+  .bg-stage {
+    background: radial-gradient(
+      125% 125% at 50% 30%,
+      #26262d 0%,
+      #15151a 45%,
+      #0a0a0b 100%
+    );
+  }
+  /* Big hero wordmark with a soft drop shadow. */
+  .text-hero {
+    text-shadow: 0 22px 45px rgba(0, 0, 0, 0.6);
+  }
+
+  /* Reveal-on-scroll: hidden + lifted until the <Reveal> component adds
+     .is-visible the first time the element scrolls into view. */
+  .reveal {
+    opacity: 0;
+    transform: translateY(28px);
+    transition:
+      opacity 0.7s cubic-bezier(0.22, 1, 0.36, 1),
+      transform 0.7s cubic-bezier(0.22, 1, 0.36, 1);
+    will-change: opacity, transform;
+  }
+  .reveal.is-visible {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Honor reduced-motion: never hide or animate content. */
+@media (prefers-reduced-motion: reduce) {
+  .reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+}
+
+/* Transparent-background checkerboard, used to preview cut-out (PNG) results.
+   Dark variant to fit the theme. */
+.checkerboard {
+  background-color: #1b1b21;
+  background-image:
+    linear-gradient(45deg, #26262d 25%, transparent 25%),
+    linear-gradient(-45deg, #26262d 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #26262d 75%),
+    linear-gradient(-45deg, transparent 75%, #26262d 75%);
+  background-size: 20px 20px;
+  background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+}
