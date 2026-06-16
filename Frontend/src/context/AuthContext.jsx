@@ -1,57 +1,100 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { supabase } from "../lib/supabase.js";
+import { fetchMe } from "../lib/api.js";
 
 /**
- * Mock auth so the full sign-up → login → dashboard → tool flow is clickable
- * before any real backend exists. The "session" is just a user object kept in
- * localStorage. Swap the body of login/signup/logout for real API calls later;
- * the rest of the app only depends on this hook's shape.
+ * Real auth, backed by Supabase. The hook keeps the same shape the app already
+ * uses ({ user, isAuthenticated, login, signup, logout }) so pages didn't need
+ * to change. `user` merges the Supabase session with the profile (credits/plan)
+ * loaded from the backend's /api/me. `loading` is true until the initial session
+ * is resolved, so a refresh doesn't flash logged-in users back to /login.
  */
 const AuthContext = createContext(null);
 
-const STORAGE_KEY = "clearcut.user";
-
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(() => {
+  const [session, setSession] = useState(null);
+  const [profile, setProfile] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  // Load the profile (credits/plan) for the current session; clear on failure.
+  async function loadProfile() {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      return raw ? JSON.parse(raw) : null;
+      setProfile(await fetchMe());
     } catch {
-      return null;
+      setProfile(null);
     }
-  });
+  }
 
   useEffect(() => {
-    if (user) localStorage.setItem(STORAGE_KEY, JSON.stringify(user));
-    else localStorage.removeItem(STORAGE_KEY);
-  }, [user]);
+    let active = true;
+
+    supabase.auth.getSession().then(async ({ data }) => {
+      if (!active) return;
+      setSession(data.session);
+      if (data.session) await loadProfile();
+      setLoading(false);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (_event, nextSession) => {
+      if (!active) return;
+      setSession(nextSession);
+      if (nextSession) await loadProfile();
+      else setProfile(null);
+    });
+
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  const user = useMemo(() => {
+    if (!session?.user) return null;
+    return {
+      id: session.user.id,
+      email: session.user.email,
+      name: profile?.full_name || session.user.email?.split("@")[0],
+      plan: profile?.plan ?? "payg",
+      credits: profile?.credits ?? 0,
+    };
+  }, [session, profile]);
 
   const value = useMemo(
     () => ({
       user,
-      isAuthenticated: Boolean(user),
-      // Fake network latency so loading states are visible in the prototype.
-      async login({ email }) {
-        await new Promise((r) => setTimeout(r, 500));
-        const next = {
+      loading,
+      isAuthenticated: Boolean(session?.user),
+
+      async login({ email, password }) {
+        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) throw new Error(error.message);
+        await loadProfile();
+      },
+
+      async signup({ name, email, password }) {
+        const { data, error } = await supabase.auth.signUp({
           email,
-          name: email.split("@")[0],
-          plan: "Starter",
-          credits: 50,
-        };
-        setUser(next);
-        return next;
+          password,
+          options: { data: { full_name: name } },
+        });
+        if (error) throw new Error(error.message);
+        // With email confirmation on, signUp returns no session until confirmed.
+        if (data.session) {
+          await loadProfile();
+          return { needsConfirmation: false };
+        }
+        return { needsConfirmation: true };
       },
-      async signup({ name, email }) {
-        await new Promise((r) => setTimeout(r, 600));
-        const next = { email, name: name || email.split("@")[0], plan: "Pay as you go", credits: 0 };
-        setUser(next);
-        return next;
+
+      async logout() {
+        await supabase.auth.signOut();
       },
-      logout() {
-        setUser(null);
-      },
+
+      refreshProfile: loadProfile,
     }),
-    [user]
+    [user, loading, session]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

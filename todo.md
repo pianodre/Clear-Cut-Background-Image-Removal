@@ -2,46 +2,46 @@
 
 Turning ClearCut from a styled frontend + local prototype into a real, hosted, multi-user SaaS.
 
-**Where we are now**
-- `Frontend/` — React + Vite + Tailwind UI is done (mock auth + mock removal API).
-- `Test-Version/` — a working local Flask tool that already calls the **Photoroom API**, batch-processes a folder concurrently (retries, backoff, timeouts, HEIC, resize, NDJSON progress, resume checkpoints). This is the proven engine to port — don't rewrite it.
+**Status (2026-06-16):** Backend (FastAPI), Supabase (DB/Auth/Storage), and the wired frontend all **working end-to-end locally**. Real flow runs: sign up → credits → upload (single/folder/zip) → streamed progress → download. **Remaining: billing (Stripe), hosting/deploy, and hardening.**
 
-**The core shift:** `Test-Version` reads/writes *local folders* for *one user*. We need an *HTTP API* that takes *uploaded batches* from *many authenticated, paying users*. Built for batches, not one-at-a-time.
+**Where we are now**
+- `Frontend/` — React + Vite + Tailwind UI, **wired to the real backend** (Supabase auth + real `/api`).
+- `Backend/` — **FastAPI** API: auth, batch jobs (single/folder/zip), NDJSON progress, credits, Supabase Storage. Runs on **port 8001**. See `Backend/README.md`.
+- `Test-Version/` — the original local Flask prototype; the proven Photoroom engine, already ported into `Backend/`. Kept for reference.
+
+**The core shift (done):** `Test-Version` read/wrote *local folders* for *one user*; the backend is now an *HTTP API* taking *uploaded batches* from *many authenticated, paying users*.
 
 ---
 
-## Phase 0 — Decisions & accounts (do first, they shape everything)
+## Phase 0 — Decisions & accounts (mostly done)
 
-- [ ] Confirm **Photoroom plan/tier** (Max vs Enterprise), its **rate limits**, and **per-image cost** — this caps our concurrency and margins.
-- [ ] Lock the **pricing model**: pay-per-image credits, the $29 Studio subscription, or both. (Drives the billing build.)
-- [ ] Decide **backend stack** → recommend **keep Flask** (the engine already works in `Test-Version`).
-- [ ] Create accounts/projects: **Supabase**, **Stripe**, a **backend host** (Render/Railway/Fly), **Vercel** (frontend), and the **domain** (clearcut.app?).
+- [x] **Pricing model** locked: **both** — pay-per-image credits *and* the Studio subscription. No free tier.
+- [x] **Backend stack** decided: **Python + FastAPI** (the Photoroom engine was ported into `Backend/`).
+- [x] **Supabase** project created (`ClearCut`, ref `pcpmbdxfquimdddjyvuq`, free tier).
+- [ ] Confirm **Photoroom Max** rate limits + **per-image cost** (have a Max key; need the limits/margins). Caps concurrency (`MAX_WORKERS`).
+- [ ] Create remaining accounts: **Stripe**, a **backend host** (Render/Railway/Fly), **Vercel** (frontend), **domain** (clearcut.app?).
 
-## Phase 1 — Backend API (port the proven engine)
+## Phase 1 — Backend API (DONE ✅)
 
-- [ ] New `Backend/` folder. Lift the Photoroom logic from `Test-Version/app.py` (`remove_background`, retries/backoff, scaling, HEIC, `ThreadPoolExecutor`).
-- [ ] Swap the local-folder model for HTTP:
-  - [ ] `POST /api/jobs` — accept a **multipart batch upload**; create a job + per-image rows; store originals in Supabase Storage.
-  - [ ] **Handle all three upload modes** the frontend sends:
-    - [ ] **Single image** — one file → one-image job.
-    - [ ] **Folder / multiple images** — many files in one request (the frontend flattens a folder into a file list); process the whole batch.
-    - [ ] **.zip archive** — accept the upload, **unzip server-side**, find the supported images inside (skip junk/nested non-images), and feed them into the same batch pipeline.
-  - [ ] Normalize all three into one internal list of images, then run the **same** concurrent pipeline — don't fork the logic per mode.
-  - [ ] Process the batch concurrently with **rate limiting** tuned to the Photoroom tier.
-  - [ ] Report progress: stream **NDJSON/SSE** (reuse the prototype's progress events) or poll `GET /api/jobs/:id`.
-  - [ ] `GET /api/jobs/:id/download` — return all results as a **ZIP**.
-- [ ] Keep the retry/backoff/timeout logic (it's already solid).
-- [ ] **Security:** validate file type + size server-side **for every mode** (incl. each entry extracted from a zip — guard against zip bombs / path traversal / huge archives), cap batch count + total upload size, require a valid Supabase JWT on every endpoint, lock **CORS** to the frontend origin, keep all keys in env vars.
-- [ ] **Credits:** check balance before a job, decrement per successful image, refund/skip on failure.
+- [x] `Backend/` (FastAPI). Photoroom engine ported to `app/photoroom.py` (retries/backoff/timeout/scaling/HEIC, on in-memory bytes).
+- [x] HTTP model:
+  - [x] `POST /api/jobs` — multipart batch upload; creates a job + per-image rows; stores originals in Storage.
+  - [x] All three upload modes — single / folder / **.zip** (unzipped server-side, supported images only) — normalized into **one** pipeline (`app/services/images.py`).
+  - [x] Concurrent processing via `ThreadPoolExecutor` (`MAX_WORKERS`, default 2).
+  - [x] Progress streamed as **NDJSON**; `GET /api/jobs/:id` for status + per-image signed result URLs.
+  - [x] `GET /api/jobs/:id/download` — results as a **ZIP**.
+- [x] Retry/backoff/timeout kept; **storage uploads** also retry on transient TLS errors (thread-local clients).
+- [x] **Security:** server-side type/size/count caps for every mode incl. zip entries (zip-bomb + path-traversal guards); Supabase JWT required on every `/api/*`; CORS locked; keys in env. *(Verified: security advisors clean.)*
+- [x] **Credits:** reserve a credit before Photoroom, refund on failure (failed images never charged).
 
-## Phase 2 — Supabase (Auth + DB + Storage)
+## Phase 2 — Supabase (mostly done)
 
-- [ ] Enable **Auth**: email/password (+ optional Google). Email verification + password reset.
-- [ ] Tables: `profiles` (1:1 with `auth.users`), `credits`/wallet, `jobs`, `job_images`, `transactions`, `subscriptions`.
-- [ ] **Row-Level Security** on every table — users see only their own rows; backend uses the service role for writes.
-- [ ] **Storage** buckets: `uploads` (originals) + `results` (PNGs).
-- [ ] **Auto-cleanup job** — delete uploads/results after N days (these are clients' photos; don't hoard them — privacy + storage cost).
-- [ ] Track schema with **Supabase CLI migrations**.
+- [x] **Auth** email/password (email confirmation ON by default; password reset available). Google optional — not added yet.
+- [x] Tables: `profiles` (cached `credits` + `plan`), `jobs`, `job_images`, `credit_transactions` (ledger), `subscriptions`.
+- [x] **RLS** on every table — users read only their own rows; backend writes via service role.
+- [x] **Storage** buckets `uploads` + `results` (private; backend mints signed URLs).
+- [x] Schema tracked via Supabase migrations (`01`–`06`).
+- [ ] **Auto-cleanup job** — delete uploads/results after N days (privacy + storage cost). *(Not done.)*
 
 ## Phase 3 — Billing (there's no free tier, so this gates usage)
 
@@ -50,13 +50,14 @@ Turning ClearCut from a styled frontend + local prototype into a real, hosted, m
 - [ ] **Customer portal** for managing/cancelling subscription.
 - [ ] Enforce: block processing at 0 credits; surface a clear "buy credits" path.
 
-## Phase 4 — Wire the frontend to the real backend
+## Phase 4 — Wire the frontend to the real backend (DONE ✅)
 
-- [ ] Replace mock `src/context/AuthContext.jsx` with the **Supabase Auth** client (session, login/signup/logout, protected routes).
-- [ ] Replace mock `src/lib/api.js` with real `/api` calls (upload batch → progress → download ZIP).
-- [ ] **Tool page:** multi-file **and folder** upload (`webkitdirectory`), a per-image progress list, partial-failure handling, "download all".
-- [ ] **Dashboard:** real credits, plan, and recent jobs from the DB; a "buy credits" CTA.
-- [ ] States: loading / error / empty; disable actions when out of credits.
+- [x] `src/context/AuthContext.jsx` now uses **Supabase Auth** (session restore, login/signup/logout); `ProtectedRoute` waits for session.
+- [x] `src/lib/api.js` makes real `/api` calls (multipart upload → NDJSON progress → ZIP download), all Bearer-authed; `src/lib/supabase.js` added.
+- [x] **Tool page:** single/folder(`webkitdirectory`)/zip upload, live batch progress, partial-failure handling, per-image download + "download all".
+- [x] **Dashboard:** real credits, plan, recent jobs from the DB.
+- [x] States: loading / error / empty.
+- [ ] "**Buy credits**" CTA + disable actions at 0 credits — deferred to billing (Phase 3).
 
 ## Phase 5 — Hosting & deploy
 

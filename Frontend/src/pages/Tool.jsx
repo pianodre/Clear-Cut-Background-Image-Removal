@@ -2,7 +2,8 @@ import { useRef, useState } from "react";
 import Navbar from "../components/Navbar.jsx";
 import Footer from "../components/Footer.jsx";
 import Reveal from "../components/Reveal.jsx";
-import { removeBackground, isSupported } from "../lib/api.js";
+import { useAuth } from "../context/AuthContext.jsx";
+import { createJob, fetchJob, downloadJobZip, isSupported } from "../lib/api.js";
 
 function isZip(file) {
   return (
@@ -19,37 +20,27 @@ function formatSize(bytes) {
 }
 
 export default function Tool() {
+  const { user, refreshProfile } = useAuth();
   const filesInputRef = useRef(null);
   const folderInputRef = useRef(null);
   const zipInputRef = useRef(null);
   const idRef = useRef(0);
 
+  // phase: "idle" (building the queue) -> "processing" -> "done" (results)
+  const [phase, setPhase] = useState("idle");
   const [items, setItems] = useState([]);
   const [dragging, setDragging] = useState(false);
   const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+  const [overall, setOverall] = useState({ current: 0, total: 0 });
+  const [summary, setSummary] = useState(null);
+  const [results, setResults] = useState([]);
+  const [jobId, setJobId] = useState(null);
+  const [downloading, setDownloading] = useState(false);
 
-  function updateItem(id, patch) {
-    setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)));
-  }
-
-  async function runItem(item) {
-    updateItem(item.id, { status: "working", progress: 0 });
-    try {
-      const { url } = await removeBackground(item.file, {
-        onProgress: (p) => updateItem(item.id, { progress: p }),
-      });
-      updateItem(item.id, { status: "done", progress: 100, resultUrl: url });
-    } catch (err) {
-      updateItem(item.id, { status: "error", error: err.message || "Failed." });
-    }
-  }
-
-  /**
-   * Accept any of the three upload modes — a single image, many images / a whole
-   * folder, or a .zip — by classifying each File. Images are processed here
-   * (mock); a .zip is queued as an archive (the server expands + processes it,
-   * so the frontend just accepts it).
-   */
+  /** Accept the three upload modes — a single image, many images / a folder, or
+   *  a .zip — by classifying each File. Nothing is processed until the user
+   *  hits "Remove backgrounds". */
   function addFiles(fileList) {
     const incoming = Array.from(fileList || []);
     const accepted = [];
@@ -63,8 +54,7 @@ export default function Tool() {
           name: file.name,
           size: file.size,
           kind: "archive",
-          status: "ready",
-          progress: 0,
+          status: "queued",
         });
       } else if (isSupported(file)) {
         accepted.push({
@@ -74,26 +64,87 @@ export default function Tool() {
           size: file.size,
           kind: "image",
           status: "queued",
-          progress: 0,
           previewUrl: URL.createObjectURL(file),
         });
       } else {
-        ignored += 1; // skip non-image, non-zip files (e.g. stray files in a folder)
+        ignored += 1;
       }
     }
 
     if (!accepted.length) {
-      setNotice("No supported files found. Use JPG, PNG, WebP, or a .zip.");
+      setNotice("No supported files found. Use JPG, PNG, WebP, HEIC, or a .zip.");
       return;
     }
     setNotice(ignored ? `Added ${accepted.length} file(s) · skipped ${ignored} unsupported.` : "");
     setItems((prev) => [...prev, ...accepted]);
-    accepted.filter((i) => i.kind === "image").forEach(runItem);
   }
 
-  function clearAll() {
+  function startOver() {
+    items.forEach((it) => it.previewUrl && URL.revokeObjectURL(it.previewUrl));
     setItems([]);
+    setResults([]);
+    setSummary(null);
+    setJobId(null);
     setNotice("");
+    setError("");
+    setOverall({ current: 0, total: 0 });
+    setPhase("idle");
+  }
+
+  async function process() {
+    if (!items.length) return;
+    setError("");
+    setPhase("processing");
+    setOverall({ current: 0, total: items.length });
+    setItems((prev) => prev.map((it) => ({ ...it, status: "working" })));
+
+    try {
+      const done = await createJob(
+        items.map((it) => it.file),
+        {
+          onEvent: (evt) => {
+            if (evt.type === "start") {
+              setOverall({ current: 0, total: evt.total });
+            } else if (evt.type === "progress") {
+              setOverall({ current: evt.current, total: evt.total });
+              // Reflect live status on the matching image item (by filename).
+              setItems((prev) => {
+                const idx = prev.findIndex(
+                  (it) => it.kind === "image" && it.name === evt.filename && it.status === "working"
+                );
+                if (idx < 0) return prev;
+                const copy = [...prev];
+                copy[idx] = { ...copy[idx], status: evt.status === "success" ? "done" : "error" };
+                return copy;
+              });
+            }
+          },
+        }
+      );
+
+      setSummary(done);
+      const detail = await fetchJob(done.job_id);
+      setResults(detail.images);
+      setJobId(done.job_id);
+      setPhase("done");
+      refreshProfile(); // credits changed
+    } catch (err) {
+      setError(err.message || "Processing failed.");
+      // Roll items back to queued so they're not stuck on "working" and can retry.
+      setItems((prev) => prev.map((it) => ({ ...it, status: "queued" })));
+      setPhase("idle");
+    }
+  }
+
+  async function handleDownloadAll() {
+    setDownloading(true);
+    try {
+      await downloadJobZip(jobId);
+    } catch (err) {
+      setError(err.message || "Could not download results.");
+    } finally {
+      setDownloading(false);
+    }
   }
 
   function onDrop(e) {
@@ -104,13 +155,14 @@ export default function Tool() {
 
   function onPicked(e) {
     addFiles(e.target.files);
-    e.target.value = ""; // allow re-picking the same selection
+    e.target.value = "";
   }
 
-  const hasItems = items.length > 0;
+  const isProcessing = phase === "processing";
   const images = items.filter((i) => i.kind === "image");
   const archives = items.filter((i) => i.kind === "archive");
-  const doneCount = images.filter((i) => i.status === "done").length;
+  const succeeded = results.filter((r) => r.status === "success");
+  const failed = results.filter((r) => r.status !== "success");
 
   return (
     <div className="flex min-h-screen flex-col bg-ink-950">
@@ -122,14 +174,14 @@ export default function Tool() {
         </Reveal>
         <Reveal as="p" delay={140} className="mt-3 max-w-xl text-sm leading-relaxed text-ink-300">
           Upload a single image, a whole folder, or a .zip — ClearCut cuts out every photo in the batch.
+          You have <span className="font-semibold text-white">{user?.credits ?? 0}</span> credits.
         </Reveal>
 
-        {/* Hidden inputs for the three selection modes. The folder input needs
-            webkitdirectory set imperatively to avoid React unknown-attribute warnings. */}
+        {/* Hidden inputs for the three selection modes. */}
         <input
           ref={filesInputRef}
           type="file"
-          accept="image/jpeg,image/png,image/webp"
+          accept="image/jpeg,image/png,image/webp,image/heic"
           multiple
           className="hidden"
           onChange={onPicked}
@@ -156,52 +208,73 @@ export default function Tool() {
           onChange={onPicked}
         />
 
-        {/* Dropzone + the three pickers */}
-        <Reveal
-          as="div"
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDragging(true);
-          }}
-          onDragLeave={() => setDragging(false)}
-          onDrop={onDrop}
-          className={`mt-10 rounded-2xl border-2 border-dashed px-6 py-14 text-center transition ${
-            dragging ? "border-white bg-ink-900" : "border-ink-700 bg-ink-900/40"
-          }`}
-        >
-          <svg viewBox="0 0 24 24" className="mx-auto h-10 w-10 text-ink-400" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 16V4m0 0L7 9m5-5l5 5M4 20h16" />
-          </svg>
-          <p className="mt-5 text-sm uppercase tracking-widest text-ink-200">Drop images or a .zip here</p>
-          <p className="mt-2 text-xs text-ink-500">JPG, PNG, WebP, or .zip — single, folder, or archive</p>
-          <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-            <button onClick={() => filesInputRef.current?.click()} className="btn-primary px-5 py-2.5">
-              Browse images
-            </button>
-            <button onClick={() => folderInputRef.current?.click()} className="btn-ghost px-5 py-2.5">
-              Select folder
-            </button>
-            <button onClick={() => zipInputRef.current?.click()} className="btn-ghost px-5 py-2.5">
-              Upload .zip
-            </button>
-          </div>
-          {notice && <p className="mt-5 text-xs text-ink-400">{notice}</p>}
-        </Reveal>
+        {/* Dropzone + pickers (hidden once results are shown) */}
+        {phase !== "done" && (
+          <Reveal
+            as="div"
+            onDragOver={(e) => {
+              e.preventDefault();
+              if (!isProcessing) setDragging(true);
+            }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(e) => !isProcessing && onDrop(e)}
+            className={`mt-10 rounded-2xl border-2 border-dashed px-6 py-14 text-center transition ${
+              dragging ? "border-white bg-ink-900" : "border-ink-700 bg-ink-900/40"
+            } ${isProcessing ? "pointer-events-none opacity-50" : ""}`}
+          >
+            <svg viewBox="0 0 24 24" className="mx-auto h-10 w-10 text-ink-400" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 16V4m0 0L7 9m5-5l5 5M4 20h16" />
+            </svg>
+            <p className="mt-5 text-sm uppercase tracking-widest text-ink-200">Drop images or a .zip here</p>
+            <p className="mt-2 text-xs text-ink-500">JPG, PNG, WebP, HEIC, or .zip — single, folder, or archive</p>
+            <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+              <button onClick={() => filesInputRef.current?.click()} className="btn-primary px-5 py-2.5" disabled={isProcessing}>
+                Browse images
+              </button>
+              <button onClick={() => folderInputRef.current?.click()} className="btn-ghost px-5 py-2.5" disabled={isProcessing}>
+                Select folder
+              </button>
+              <button onClick={() => zipInputRef.current?.click()} className="btn-ghost px-5 py-2.5" disabled={isProcessing}>
+                Upload .zip
+              </button>
+            </div>
+            {notice && <p className="mt-5 text-xs text-ink-400">{notice}</p>}
+          </Reveal>
+        )}
 
-        {/* Queue */}
-        {hasItems && (
+        {error && <p className="mt-6 text-sm text-rose-400">{error}</p>}
+
+        {/* Queue (idle + processing) */}
+        {phase !== "done" && items.length > 0 && (
           <div className="mt-10">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold uppercase tracking-widest text-ink-300">
-                Queue — {doneCount}/{images.length} images
+                Queue — {images.length} image{images.length === 1 ? "" : "s"}
                 {archives.length ? ` · ${archives.length} archive${archives.length > 1 ? "s" : ""}` : ""}
               </h2>
-              <button onClick={clearAll} className="text-xs uppercase tracking-widest text-ink-400 transition hover:text-white">
-                Clear all
-              </button>
+              {!isProcessing && (
+                <button onClick={startOver} className="text-xs uppercase tracking-widest text-ink-400 transition hover:text-white">
+                  Clear all
+                </button>
+              )}
             </div>
 
-            <ul className="mt-4 space-y-3">
+            {isProcessing && (
+              <div className="mt-5">
+                <div className="flex items-center justify-between text-xs uppercase tracking-widest text-ink-400">
+                  <span>Processing…</span>
+                  <span>{overall.current}/{overall.total}</span>
+                </div>
+                <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-ink-700">
+                  <div
+                    className="h-full rounded-full bg-white transition-all"
+                    style={{ width: `${overall.total ? (overall.current / overall.total) * 100 : 0}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            <ul className="mt-5 space-y-3">
               {items.map((it) => (
                 <li key={it.id} className="card flex items-center gap-4 p-4">
                   <div className="checkerboard grid h-14 w-14 shrink-0 place-items-center overflow-hidden rounded-lg border border-ink-700">
@@ -211,56 +284,94 @@ export default function Tool() {
                         <path d="M12 5v3m0 2v2m0 2v2" />
                       </svg>
                     ) : (
-                      <img src={it.resultUrl || it.previewUrl} alt="" className="h-full w-full object-cover" />
+                      <img src={it.previewUrl} alt="" className="h-full w-full object-cover" />
                     )}
                   </div>
-
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm text-ink-100">{it.name}</p>
                     <p className="mt-0.5 text-xs text-ink-500">
                       {formatSize(it.size)} · {it.kind === "archive" ? "ZIP archive" : "image"}
                     </p>
-                    {it.kind === "image" && it.status === "working" && (
-                      <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-ink-700">
-                        <div className="h-full rounded-full bg-white transition-all" style={{ width: `${it.progress}%` }} />
-                      </div>
-                    )}
                   </div>
-
                   <div className="shrink-0 text-right">
-                    {it.kind === "archive" ? (
-                      <span className="text-[0.65rem] uppercase tracking-widest text-ink-400">Expands on upload</span>
-                    ) : it.status === "done" ? (
-                      <a
-                        href={it.resultUrl}
-                        download={`clearcut-${it.name.replace(/\.[^.]+$/, "")}.png`}
-                        className="btn-ghost px-4 py-2"
-                      >
-                        Download
-                      </a>
-                    ) : it.status === "error" ? (
-                      <span className="text-xs text-rose-400">{it.error}</span>
-                    ) : (
-                      <span className="text-[0.65rem] uppercase tracking-widest text-ink-400">
-                        {it.status === "working" ? `${it.progress}%` : "Queued"}
-                      </span>
-                    )}
+                    <span className="text-[0.65rem] uppercase tracking-widest text-ink-400">
+                      {it.kind === "archive"
+                        ? isProcessing ? "Expanding" : "Will expand"
+                        : it.status === "done" ? "Done"
+                        : it.status === "error" ? <span className="text-rose-400">Failed</span>
+                        : it.status === "working" ? "Working…"
+                        : "Queued"}
+                    </span>
                   </div>
                 </li>
               ))}
             </ul>
 
             <div className="mt-6 flex flex-wrap gap-3">
-              <button onClick={() => filesInputRef.current?.click()} className="btn-ghost px-5 py-2.5">
-                Add more
+              <button onClick={process} className="btn-primary px-7 py-3" disabled={isProcessing}>
+                {isProcessing ? "Removing backgrounds…" : `Remove backgrounds (${items.length})`}
               </button>
+              {!isProcessing && (
+                <button onClick={() => filesInputRef.current?.click()} className="btn-ghost px-5 py-3">
+                  Add more
+                </button>
+              )}
             </div>
 
-            {archives.length > 0 && (
+            {archives.length > 0 && !isProcessing && (
               <p className="mt-4 text-xs text-ink-500">
-                Archives are expanded and processed on the server after upload — the preview here just shows them queued.
+                Archives are expanded and processed on the server — every supported image inside is cut.
               </p>
             )}
+          </div>
+        )}
+
+        {/* Results */}
+        {phase === "done" && (
+          <div className="mt-10">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <h2 className="text-sm font-semibold uppercase tracking-widest text-ink-300">
+                Results — {succeeded.length} done
+                {failed.length ? ` · ${failed.length} failed` : ""}
+                {summary ? ` · ${summary.credits_charged} credits used` : ""}
+              </h2>
+              <div className="flex gap-3">
+                {succeeded.length > 0 && (
+                  <button onClick={handleDownloadAll} className="btn-primary px-5 py-2.5" disabled={downloading}>
+                    {downloading ? "Preparing…" : "Download all (ZIP)"}
+                  </button>
+                )}
+                <button onClick={startOver} className="btn-ghost px-5 py-2.5">
+                  Start over
+                </button>
+              </div>
+            </div>
+
+            <ul className="mt-5 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+              {results.map((r) => (
+                <li key={r.id} className="card overflow-hidden p-3">
+                  <div className="checkerboard grid aspect-square w-full place-items-center overflow-hidden rounded-lg border border-ink-700">
+                    {r.status === "success" && r.result_url ? (
+                      <img src={r.result_url} alt={r.original_filename} className="h-full w-full object-contain" />
+                    ) : (
+                      <span className="px-2 text-center text-xs text-rose-400">{r.error || "Failed"}</span>
+                    )}
+                  </div>
+                  <p className="mt-2 truncate text-xs text-ink-200" title={r.original_filename}>
+                    {r.original_filename}
+                  </p>
+                  {r.status === "success" && r.result_url && (
+                    <a
+                      href={r.result_url}
+                      download={`${r.original_filename.replace(/\.[^.]+$/, "")}.png`}
+                      className="btn-ghost mt-2 block px-3 py-1.5 text-center text-xs"
+                    >
+                      Download
+                    </a>
+                  )}
+                </li>
+              ))}
+            </ul>
           </div>
         )}
       </main>

@@ -11,11 +11,13 @@ export default function Signup() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(false);
 
   async function handleSubmit(e) {
     e.preventDefault();
     setError("");
+    setNotice("");
     if (!email || !password) {
       setError("Enter your email and a password.");
       return;
@@ -26,8 +28,12 @@ export default function Signup() {
     }
     setLoading(true);
     try {
-      await signup({ name, email, password });
-      navigate("/dashboard", { replace: true });
+      const { needsConfirmation } = await signup({ name, email, password });
+      if (needsConfirmation) {
+        setNotice("Account created. Check your email to confirm, then log in.");
+      } else {
+        navigate("/dashboard", { replace: true });
+      }
     } catch (err) {
       setError(err.message || "Could not create account.");
     } finally {
@@ -87,6 +93,7 @@ export default function Signup() {
         </div>
 
         {error && <p className="text-sm text-rose-400">{error}</p>}
+        {notice && <p className="text-sm text-emerald-400">{notice}</p>}
 
         <button type="submit" className="btn-primary w-full" disabled={loading}>
           {loading ? "Creating account…" : "Create account"}

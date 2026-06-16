@@ -1,0 +1,24 @@
+# Secrets / environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Logs / temp
+*.log
+
+# macOS
+.DS_Store
+
+# Claude Code
+.claude/
